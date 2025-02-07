@@ -1,0 +1,3 @@
+[submodule "E2IBS-OAI-Integration"]
+	path = E2IBS-OAI-Integration
+	url = https://github.com/NaivEPoi/E2IBS-OAI-Integration.git

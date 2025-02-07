@@ -17,6 +17,7 @@ bls/g
 
 # E2IBS
 E2IBS/FourQ_64bit_and_portable/*.o
+E2IBS/FourQ_64bit_and_portable/AMD64/consts.s
 E2IBS/FourQ_64bit_and_portable/ARIS
 E2IBS/FourQ_64bit_and_portable/E2IBS
 E2IBS/FourQ_64bit_and_portable/schnorr-HIBS
