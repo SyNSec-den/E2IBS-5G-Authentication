@@ -44,6 +44,8 @@ int main()
 	prf_out = malloc(16*2);
 	prf_out2 = malloc(16*2);
     uint64_t i, index;
+    uint64_t u;
+    int zz;
 	i = 0;
     
 // Variables for key pairs and BPV
@@ -98,14 +100,17 @@ int main()
     concatMsg_ver = malloc(32+64);
     
 //  Benchmarking variables 
-    double SignTime, VerifyTime;
+    double KeyGenTime, SignTime, VerifyTime;
+    KeyGenTime = 0.0;
     SignTime = 0.0;
     VerifyTime = 0.0;
-    clock_t flagSignStart, flagVerStart;
-	clock_t flagSignEnd, flagVerEnd; 
+    clock_t flagKeyGenStart, flagSignStart, flagVerStart;
+	clock_t flagKeyGenEnd, flagSignEnd, flagVerEnd; 
+	unsigned long long kcycles, kcycles1, kcycles2;
     unsigned long long cycles, cycles1, cycles2;     
     unsigned long long vcycles, vcycles1, vcycles2;
 
+	kcycles = 0;
     vcycles = 0;
     cycles = 0;
 //  Other variables 
@@ -128,39 +133,49 @@ int main()
     }
 
     // ......................... KeyGen .............................
+    for (zz=0; zz<BENCH_LOOPS; zz++) {
+        flagKeyGenStart = clock();
+        kcycles1 = cpucycles();
 
-    // generate u
-    uint64_t u = 0;
-    for (i=0; i<32; i++) {
-        u |= (uint64_t)user_identity[i] << (8 * i);;
-    }
-    ecbEncCounterMode(u, 2, prf_out); // use the same prf for now
-    memmove(prf_out2, prf_out, 32); // gen 32 bytes u
-    modulo_order((digit_t*)prf_out2, (digit_t*)secret_u);
+        // generate u
+        u = 0;
+        for (i=0; i<32; i++) {
+            u |= (uint64_t)user_identity[i] << (8 * i);;
+        }
+        ecbEncCounterMode(u, 2, prf_out); // use the same prf for now
+        memmove(prf_out2, prf_out, 32); // gen 32 bytes u
+        modulo_order((digit_t*)prf_out2, (digit_t*)secret_u);
 
-    Status = PublicKeyGeneration(prf_out2, public_C); // C_U
-    if (Status != ECCRYPTO_SUCCESS) {
-        goto cleanup;
+        Status = PublicKeyGeneration(prf_out2, public_C); // C_U
+        if (Status != ECCRYPTO_SUCCESS) {
+            goto cleanup;
+        }
+
+        // compute j
+        memmove(con_U_C, user_identity, 32); // Concatenate U and C_U 
+        memmove(con_U_C+32, public_C, 64);
+        blake2b(hashedIndexK, con_U_C, NULL, 64, 32+64, 0); // H1    
+
+        index = hashedIndexK[0] + ((hashedIndexK[1]/64) * 256);
+        memmove(secret_x, secretAll_z+32*index, 32);
+        for (i = 1; i < SEL_K; ++i) {
+            index = hashedIndexK[2*i] + ((hashedIndexK[2*i+1]/64) * 256); // gen 10 bits index
+            memmove(secretTemp, secretAll_z+32*index, 32); // z_j_i
+            add_mod_order((digit_t*)secretTemp, (digit_t*)secret_x, (digit_t*)secret_x);
+        }
+        add_mod_order((digit_t*)secret_u, (digit_t*)secret_x, (digit_t*)secret_x);
+
+        flagKeyGenEnd = clock();
+        KeyGenTime = KeyGenTime +(double)(flagKeyGenEnd-flagKeyGenStart);
+        kcycles2 = cpucycles();
+        kcycles = kcycles + (kcycles2 - kcycles1);
     }
 
-    // // compute j
-    memmove(con_U_C, user_identity, 32); // Concatenate U and C_U 
-    memmove(con_U_C+32, public_C, 64);
-    blake2b(hashedIndexK, con_U_C, NULL, 64, 32+64, 0); // H1    
-    
-    index = hashedIndexK[0] + ((hashedIndexK[1]/64) * 256);
-    memmove(secret_x, secretAll_z+32*index, 32);
-    for (i = 1; i < SEL_K; ++i) {
-        index = hashedIndexK[2*i] + ((hashedIndexK[2*i+1]/64) * 256); // gen 10 bits index
-        memmove(secretTemp, secretAll_z+32*index, 32); // z_j_i
-        add_mod_order((digit_t*)secretTemp, (digit_t*)secret_x, (digit_t*)secret_x);
-    }
-    add_mod_order((digit_t*)secret_u, (digit_t*)secret_x, (digit_t*)secret_x);
+    printf("%fus per key generation\n", ((double) (KeyGenTime * 1000)) / CLOCKS_PER_SEC / BENCH_LOOPS * 1000);
+    printf("Key generation runs in ............................. %2lld ", kcycles/BENCH_LOOPS);print_unit;
+    printf("\n");
 
     // ............................ Sign .............................
-
-    int zz; // used for benchmarking
-
     for (zz=0; zz<BENCH_LOOPS; zz++) {
         flagSignStart = clock();
         cycles1 = cpucycles();
