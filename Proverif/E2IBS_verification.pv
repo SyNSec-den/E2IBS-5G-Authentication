@@ -1,0 +1,123 @@
+(* ================================================================= *)
+(*  E2IBS - ProVerif model 1/2 : secrecy & authentication            *)
+(*                                                                   *)
+(*  Two-layer identity-based-signature broadcast authentication.     *)
+(*  A core-PKG issues an implicit certificate binding a gNB          *)
+(*  identity to its self-chosen public component; the gNB signs      *)
+(*  SIB1 with a two-component key (self-chosen component plus the    *)
+(*  PKG contribution) and broadcasts it to UEs over the              *)
+(*  attacker-controlled air interface.                               *)
+(*                                                                   *)
+(*  Dolev-Yao attacker, symbolic (perfect-crypto) model:             *)
+(*  signatures are treated as ideal unforgeable objects.             *)
+(* ================================================================= *)
+
+(* ---------------------------- Channels --------------------------- *)
+(*  core-PKG <-> gNB provisioning via the serving AMF:               *)
+(*  confidential, integrity-protected -> private channel.            *)
+free ch_prov: channel [private].
+(*  gNB -> UE SIB1 broadcast: fully attacker-controlled.             *)
+free ch_air:  channel.
+
+(* ----------------------------- Types ----------------------------- *)
+type skey.  (* secret scalar: msk, u1 (self-chosen), z_U *)
+type pkey.  (* public EC point: X = x * P *)
+type id.    (* gNB identity U_BS = NRCell_ID || expiry timestamp *)
+
+(* ---------- Cryptographic abstraction (destructors only) --------- *)
+(*  One-way map pk(s) = s * P.                                       *)
+fun pk(skey): pkey.
+
+(*  core-PKG contribution z_U: ARIS-style implicit                   *)
+(*  certification over identity U and the gNB commitment             *)
+(*  Q_U = pk(u1), under the master key.                              *)
+fun cert(skey, id, pkey): skey.
+
+(*  Two-component signature: signing needs BOTH the gNB              *)
+(*  self-chosen component and the PKG contribution;                  *)
+(*  verification uses the two matching public components.            *)
+fun sign2(bitstring, skey, skey): bitstring.
+reduc forall m: bitstring, a: skey, b: skey;
+    checksign2(sign2(m, a, b), pk(a), pk(b)) = m.
+
+(*  Implicit-certificate check with PUBLIC material only             *)
+(*  (mpk = pk(msk)): succeeds iff zpub genuinely certifies           *)
+(*  (U, Q_U) under the master key whose public key is mpk.           *)
+(*  Returns the public token `ok`.                                   *)
+const ok: bitstring.
+reduc forall mk: skey, u: id, qu: pkey;
+    certok(pk(mk), u, qu, pk(cert(mk, u, qu))) = ok.
+
+(* ----------------------------- Events ---------------------------- *)
+(*  Parameters: (Q_U, pk(z_U), SIB1) -- the two public key           *)
+(*  components plus the signed message.                              *)
+event begin_sign(pkey, pkey, bitstring).
+event auth_ok(pkey, pkey, bitstring).
+
+(* -------- Distinguished honest names (for direct secrecy) -------- *)
+free msk: skey [private].           (* core-PKG master key *)
+free u1:  skey [private].           (* honest gNB self-chosen component *)
+free idH: id.                       (* honest gNB identity (public) *)
+free endmark: bitstring [private].  (* released only if a UE completes *)
+
+(* ------------------------- Security goals ------------------------ *)
+(*  (G1) core-PKG master key secret.                Expected: true.  *)
+query attacker(msk).
+(*  (G2) gNB self-chosen component u1 secret (without it, no         *)
+(*       valid SIB1 signature can be produced). Expected: true.      *)
+query attacker(u1).
+(*  (G3) PKG contribution z_U for the honest gNB stays               *)
+(*       confidential (it travels only on the protected              *)
+(*       provisioning channel).                Expected: true.       *)
+query attacker(cert(msk, idH, pk(u1))).
+(*  (G4) Weak authentication (agreement): a UE accepts               *)
+(*       (Q,Z,m) only if an honest gNB signed m under those          *)
+(*       components.                           Expected: true.       *)
+query q: pkey, z: pkey, m: bitstring;
+    event(auth_ok(q, z, m)) ==> event(begin_sign(q, z, m)).
+(*  (G5) Injective (strong) agreement is NOT expected to             *)
+(*       hold: a broadcast SIB1 carries no UE-supplied               *)
+(*       freshness, so one signed message can be replayed to         *)
+(*       many UEs. Uncomment to reproduce (cannot prove):            *)
+(*  query q: pkey, z: pkey, m: bitstring;                            *)
+(*      inj-event(auth_ok(q, z, m))                                  *)
+(*          ==> inj-event(begin_sign(q, z, m)).                      *)
+(*  (G6) Executability / non-vacuity: `endmark` is released          *)
+(*       only if a UE fully completes. If this query is FALSE,       *)
+(*       ProVerif exhibits a completing trace, so the results        *)
+(*       above are not vacuous.                Expected: false.      *)
+query attacker(endmark).
+
+(* ------------------------ core-PKG process ----------------------- *)
+let CorePKG(mk: skey) =
+    in(ch_prov, (u: id, qu: pkey));
+    out(ch_prov, cert(mk, u, qu)).
+
+(* -------------------------- gNB process -------------------------- *)
+(*  Self-chooses uu (never sent to the PKG), sends only              *)
+(*  Q_U = pk(uu); receives z_U; signs SIB1 with both                 *)
+(*  components; broadcasts the two public components alongside.      *)
+let GNB(uu: skey, u: id) =
+    out(ch_prov, (u, pk(uu)));
+    in(ch_prov, zu: skey);
+    new sib1: bitstring;
+    event begin_sign(pk(uu), pk(zu), sib1);
+    out(ch_air, (u, sib1, sign2(sib1, uu, zu), pk(uu), pk(zu))).
+
+(* --------------------------- UE process -------------------------- *)
+(*  Provisioned with mpk = pk(msk).                                  *)
+let UE(mpk: pkey) =
+    in(ch_air, (u: id, m: bitstring, s: bitstring, qu: pkey, zpub: pkey));
+    (* (1) key authenticity: zpub certifies (U, Q_U) under core-PKG *)
+    let (= ok) = certok(mpk, u, qu, zpub) in
+    (* (2) message authenticity: signature valid under components  *)
+    let (= m) = checksign2(s, qu, zpub) in
+    event auth_ok(qu, zpub, m);
+    out(ch_air, endmark).
+
+(* ------------------------------ Main ----------------------------- *)
+process
+    ( !CorePKG(msk)                             (* core-PKG serving many requests *)
+    | GNB(u1, idH)                              (* the distinguished honest gNB *)
+    | !( new uu: skey; new u: id; GNB(uu, u) )  (* arbitrarily many other honest gNBs *)
+    | !UE(pk(msk)) )                            (* arbitrarily many UEs, mpk = pk(msk) *)
