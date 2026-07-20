@@ -1,0 +1,101 @@
+(* ================================================================= *)
+(*  E2IBS - ProVerif model, Algorithm 1 (base key generation)        *)
+(*                                                                   *)
+(*  The core-PKG issues a gNB's ENTIRE signing key: on a key-        *)
+(*  extraction request carrying the gNB identity U it derives        *)
+(*  sk_BS = keyext(msk, U) and returns it over the AMF-relayed       *)
+(*  provisioning link (a private channel). The gNB signs             *)
+(*  (SIB1, timestamp) under that single key and broadcasts it to     *)
+(*  UEs over the attacker-controlled air interface. A UE checks      *)
+(*  that the presented public key is the one it reconstructs from    *)
+(*  mpk for identity U, then checks the signature.                   *)
+(*                                                                   *)
+(*  Dolev-Yao attacker; signatures are ideal unforgeable objects.    *)
+(*                                                                   *)
+(*  Proof targets:                                                   *)
+(*    G1  core-PKG master key secret                       true      *)
+(*    G2  honest gNB signing key secret                    true      *)
+(*    G3  agreement: a UE accepts (P, m, t) only if an               *)
+(*        honest gNB signed m under P at timestamp t       true      *)
+(*    G4  injective agreement                             false      *)
+(*    G5  executability (non-vacuity)                     false      *)
+(* ================================================================= *)
+
+(* ---------------------------- Channels --------------------------- *)
+free ch_prov: channel [private].   (* core-PKG <-> gNB provisioning *)
+free ch_air:  channel.             (* SIB1 broadcast *)
+
+(* ----------------------------- Types ----------------------------- *)
+type skey.   (* secret scalar: msk, sk_BS *)
+type pkey.   (* public point X = x * P *)
+type id.     (* gNB identity U_BS *)
+
+(* --------------------- Cryptographic abstraction ----------------- *)
+fun pk(skey): pkey.                (* one-way map s |-> s * P *)
+fun keyext(skey, id): skey.        (* Extract: sk_BS = keyext(msk, U) *)
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, x: skey;
+    checksign(sign(m, x), pk(x)) = m.
+
+(*  Key authenticity from public material only: succeeds iff the     *)
+(*  presented key is the one reconstructed from mpk for identity U.  *)
+const ok: bitstring.
+reduc forall mk: skey, u: id;
+    keyok(pk(mk), u, pk(keyext(mk, u))) = ok.
+
+(* ----------------------------- Events ---------------------------- *)
+event begin_sign(pkey, bitstring, bitstring).
+event auth_ok(pkey, bitstring, bitstring).
+
+(* ---------------------------- Names ------------------------------ *)
+free msk: skey [private].           (* core-PKG master key *)
+free idH: id.                       (* honest gNB identity *)
+free endmark: bitstring [private].  (* released only if a UE completes *)
+
+(* ------------------------- Security goals ------------------------ *)
+(*  (G1) Expected: true. *)
+query attacker(msk).
+(*  (G2) Expected: true. The base scheme has a single key component, *)
+(*       so this covers all of the gNB's secret material.            *)
+query attacker(keyext(msk, idH)).
+(*  (G3) Expected: true. *)
+query p: pkey, m: bitstring, t: bitstring;
+    event(auth_ok(p, m, t)) ==> event(begin_sign(p, m, t)).
+(*  (G4) Expected: false. One signed SIB1 is legitimately received   *)
+(*       by many UE sessions, so several auth_ok events map to one   *)
+(*       begin_sign. G3 still holds, so this is replay, not forgery. *)
+query p: pkey, m: bitstring, t: bitstring;
+    inj-event(auth_ok(p, m, t)) ==> inj-event(begin_sign(p, m, t)).
+(*  (G5) Expected: false, exhibiting a completing trace.             *)
+query attacker(endmark).
+
+(* ------------------------ core-PKG process ----------------------- *)
+(*  Returns the whole signing key, tagged with the identity it was   *)
+(*  issued for.                                                      *)
+let CorePKG(mk: skey) =
+    in(ch_prov, u: id);
+    out(ch_prov, (u, keyext(mk, u))).
+
+(* -------------------------- gNB process -------------------------- *)
+let GNB(u: id) =
+    out(ch_prov, u);
+    in(ch_prov, (= u, skbs: skey));
+    new sib1: bitstring;
+    new ts: bitstring;              (* fresh timestamp, modeled as a nonce *)
+    event begin_sign(pk(skbs), sib1, ts);
+    out(ch_air, (u, sib1, ts, sign((sib1, ts), skbs), pk(skbs))).
+
+(* --------------------------- UE process -------------------------- *)
+let UE(mpk: pkey) =
+    in(ch_air, (u: id, m: bitstring, ts: bitstring, s: bitstring, pkbs: pkey));
+    let (= ok) = keyok(mpk, u, pkbs) in
+    let (= m, = ts) = checksign(s, pkbs) in
+    event auth_ok(pkbs, m, ts);
+    out(ch_air, endmark).
+
+(* ------------------------------ Main ----------------------------- *)
+process
+    ( !CorePKG(msk)
+    | GNB(idH)                         (* the distinguished honest gNB *)
+    | !( new u: id; GNB(u) )           (* arbitrarily many other gNBs *)
+    | !UE(pk(msk)) )                   (* arbitrarily many UEs *)

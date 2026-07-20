@@ -19,7 +19,20 @@ its evaluation, formal verification, and a full end-to-end 5G deployment where t
 | ECDSA | `ECDSA/sign.c` |
 
 ### Formal verification
-ProVerif model under `Proverif/E2IBS.pv`.
+Two ProVerif models under `Proverif/`, one per key-generation algorithm of the paper:
+
+| Model | File | Covers |
+|-------|------|--------|
+| Algorithm 1 (base key generation) | `Proverif/E2IBS_algo1.pv` | the core-PKG issues the gNB's **entire** signing key `sk_BS = keyext(msk, U)`; goals G1–G5 |
+| Algorithm 2 (split key generation) | `Proverif/E2IBS_algo2.pv` | the gNB draws `u1` itself and commits to `Q_U = u1*P`; `x_U = u1 + z_U`. Phase 1 leaks the whole `msk`, so the post-compromise goals (G6, G7) face an active attacker |
+
+Run either with:
+```bash
+proverif Proverif/E2IBS_algo1.pv
+proverif Proverif/E2IBS_algo2.pv
+```
+Each file's header comment lists the goals and their expected outcomes. Both are
+equation-free and terminate immediately.
 
 ### End-to-end 5G implementation
 - `E2IBS-OAI-Integration/` — modified OpenAirInterface **RAN** (gNB + UE). The gNB
