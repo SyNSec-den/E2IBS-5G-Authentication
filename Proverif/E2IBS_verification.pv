@@ -8,6 +8,13 @@
 (*  PKG contribution) and broadcasts it to UEs over the              *)
 (*  attacker-controlled air interface.                               *)
 (*                                                                   *)
+(*  Replay protection: every SIB1 carries a fresh timestamp,         *)
+(*  modeled here as a nonce, bound into the signature. A UE          *)
+(*  accepts a message only together with the exact timestamp the     *)
+(*  gNB signed (G4), so the attacker can neither forge, alter,       *)
+(*  nor detach the timestamp. This unforgeable freshness is what     *)
+(*  a receiver uses to reject stale or duplicate SIB1s.              *)
+(*                                                                   *)
 (*  Dolev-Yao attacker, symbolic (perfect-crypto) model:             *)
 (*  signatures are treated as ideal unforgeable objects.             *)
 (* ================================================================= *)
@@ -49,10 +56,10 @@ reduc forall mk: skey, u: id, qu: pkey;
     certok(pk(mk), u, qu, pk(cert(mk, u, qu))) = ok.
 
 (* ----------------------------- Events ---------------------------- *)
-(*  Parameters: (Q_U, pk(z_U), SIB1) -- the two public key           *)
-(*  components plus the signed message.                              *)
-event begin_sign(pkey, pkey, bitstring).
-event auth_ok(pkey, pkey, bitstring).
+(*  Parameters: (Q_U, pk(z_U), SIB1, timestamp) -- the two public    *)
+(*  key components, the signed message, and its fresh timestamp.     *)
+event begin_sign(pkey, pkey, bitstring, bitstring).
+event auth_ok(pkey, pkey, bitstring, bitstring).
 
 (* -------- Distinguished honest names (for direct secrecy) -------- *)
 free msk: skey [private].           (* core-PKG master key *)
@@ -71,17 +78,20 @@ query attacker(u1).
 (*       provisioning channel).                Expected: true.       *)
 query attacker(cert(msk, idH, pk(u1))).
 (*  (G4) Weak authentication (agreement): a UE accepts               *)
-(*       (Q,Z,m) only if an honest gNB signed m under those          *)
-(*       components.                           Expected: true.       *)
-query q: pkey, z: pkey, m: bitstring;
-    event(auth_ok(q, z, m)) ==> event(begin_sign(q, z, m)).
+(*       (Q,Z,m,t) only if an honest gNB signed m under those        *)
+(*       components at timestamp t.            Expected: true.       *)
+query q: pkey, z: pkey, m: bitstring, t: bitstring;
+    event(auth_ok(q, z, m, t)) ==> event(begin_sign(q, z, m, t)).
 (*  (G5) Injective (strong) agreement is NOT expected to             *)
-(*       hold: a broadcast SIB1 carries no UE-supplied               *)
-(*       freshness, so one signed message can be replayed to         *)
-(*       many UEs. Uncomment to reproduce (cannot prove):            *)
-(*  query q: pkey, z: pkey, m: bitstring;                            *)
-(*      inj-event(auth_ok(q, z, m))                                  *)
-(*          ==> inj-event(begin_sign(q, z, m)).                      *)
+(*       hold: one signed SIB1 is legitimately received by           *)
+(*       many UEs, so it cannot map one-to-one to a single           *)
+(*       signing event (relay caveat, Sec. VI-F). The fresh          *)
+(*       timestamp t (G4) still binds each accepted message          *)
+(*       to an unforgeable freshness value. Uncomment to             *)
+(*       reproduce (Expected: cannot prove):                         *)
+(*  query q: pkey, z: pkey, m: bitstring, t: bitstring;              *)
+(*      inj-event(auth_ok(q, z, m, t))                               *)
+(*          ==> inj-event(begin_sign(q, z, m, t)).                   *)
 (*  (G6) Executability / non-vacuity: `endmark` is released          *)
 (*       only if a UE fully completes. If this query is FALSE,       *)
 (*       ProVerif exhibits a completing trace, so the results        *)
@@ -95,24 +105,26 @@ let CorePKG(mk: skey) =
 
 (* -------------------------- gNB process -------------------------- *)
 (*  Self-chooses uu (never sent to the PKG), sends only              *)
-(*  Q_U = pk(uu); receives z_U; signs SIB1 with both                 *)
-(*  components; broadcasts the two public components alongside.      *)
+(*  Q_U = pk(uu); receives z_U; draws a fresh timestamp ts and       *)
+(*  signs (SIB1, ts) with both components; broadcasts the            *)
+(*  timestamp and the two public components alongside.               *)
 let GNB(uu: skey, u: id) =
     out(ch_prov, (u, pk(uu)));
     in(ch_prov, zu: skey);
     new sib1: bitstring;
-    event begin_sign(pk(uu), pk(zu), sib1);
-    out(ch_air, (u, sib1, sign2(sib1, uu, zu), pk(uu), pk(zu))).
+    new ts: bitstring;   (* fresh timestamp, modeled as a nonce *)
+    event begin_sign(pk(uu), pk(zu), sib1, ts);
+    out(ch_air, (u, sib1, ts, sign2((sib1, ts), uu, zu), pk(uu), pk(zu))).
 
 (* --------------------------- UE process -------------------------- *)
 (*  Provisioned with mpk = pk(msk).                                  *)
 let UE(mpk: pkey) =
-    in(ch_air, (u: id, m: bitstring, s: bitstring, qu: pkey, zpub: pkey));
+    in(ch_air, (u: id, m: bitstring, ts: bitstring, s: bitstring, qu: pkey, zpub: pkey));
     (* (1) key authenticity: zpub certifies (U, Q_U) under core-PKG *)
     let (= ok) = certok(mpk, u, qu, zpub) in
-    (* (2) message authenticity: signature valid under components  *)
-    let (= m) = checksign2(s, qu, zpub) in
-    event auth_ok(qu, zpub, m);
+    (* (2) message + freshness: signature valid over (SIB1, ts)    *)
+    let (= m, = ts) = checksign2(s, qu, zpub) in
+    event auth_ok(qu, zpub, m, ts);
     out(ch_air, endmark).
 
 (* ------------------------------ Main ----------------------------- *)

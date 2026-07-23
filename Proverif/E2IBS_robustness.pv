@@ -3,12 +3,12 @@
 (*  compromise (Corollary 1: no single point of failure).            *)
 (*                                                                   *)
 (*  Same protocol as model 1 (equation-free, two-component           *)
-(*  signature). In phase 1 the ENTIRE master key `msk` is leaked     *)
-(*  to the attacker (worst case: full core-PKG compromise). We       *)
-(*  show the honest gNB's self-chosen component u1 still stays       *)
-(*  secret, so the honest gNB's signing capability cannot be         *)
-(*  recovered even by the compromised PKG, because signing           *)
-(*  requires u1.                                                     *)
+(*  signature over (SIB1, timestamp), the timestamp modeled as a     *)
+(*  nonce). In phase 1 the ENTIRE master key `msk` is leaked to      *)
+(*  the attacker (worst case: full core-PKG compromise). We show     *)
+(*  the honest gNB's self-chosen component u1 still stays secret,    *)
+(*  so the honest gNB's signing capability cannot be recovered       *)
+(*  even by the compromised PKG, because signing requires u1.        *)
 (* ================================================================= *)
 
 (* ---------------------------- Channels --------------------------- *)
@@ -43,7 +43,7 @@ free idH: id.              (* honest gNB identity (public) *)
 (*                                                Expected: true.    *)
 query attacker(u1).
 
-(* ---------------- Processes (identical to model 1) --------------- *)
+(* ------ Processes (as in model 1, timestamp-bound signature) ----- *)
 let CorePKG(mk: skey) =
     in(ch_prov, (u: id, qu: pkey));
     out(ch_prov, cert(mk, u, qu)).
@@ -52,12 +52,13 @@ let GNB(uu: skey, u: id) =
     out(ch_prov, (u, pk(uu)));
     in(ch_prov, zu: skey);
     new sib1: bitstring;
-    out(ch_air, (u, sib1, sign2(sib1, uu, zu), pk(uu), pk(zu))).
+    new ts: bitstring;   (* fresh timestamp, modeled as a nonce *)
+    out(ch_air, (u, sib1, ts, sign2((sib1, ts), uu, zu), pk(uu), pk(zu))).
 
 let UE(mpk: pkey) =
-    in(ch_air, (u: id, m: bitstring, s: bitstring, qu: pkey, zpub: pkey));
+    in(ch_air, (u: id, m: bitstring, ts: bitstring, s: bitstring, qu: pkey, zpub: pkey));
     let (= ok) = certok(mpk, u, qu, zpub) in
-    let (= m) = checksign2(s, qu, zpub) in
+    let (= m, = ts) = checksign2(s, qu, zpub) in
     0.
 
 (* ------------- Main, with phase-1 core-PKG compromise ------------ *)
