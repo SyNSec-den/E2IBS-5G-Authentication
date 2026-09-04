@@ -13,7 +13,17 @@
 (*  and broadcasts it with its registered commitment; a UE           *)
 (*  reconstructs the effective public key from mpk, the identity     *)
 (*  and that commitment, using public material only, then checks     *)
-(*  the signature.                                                   *)
+(*  the signature and the window.                                    *)
+(*                                                                   *)
+(*  Timestamps are natural numbers, so the UE can apply the          *)
+(*  protocol's window check                                          *)
+(*                                                                   *)
+(*      T_current < T_sign + Dt        (Dt = 3 ticks here)           *)
+(*                                                                   *)
+(*  before accepting a SIB1. T_current is read off the air           *)
+(*  interface, so the attacker supplies the UE's clock: G6 says the  *)
+(*  check cannot be bypassed, not that the clock cannot be faked.    *)
+(*  Clock integrity is an assumption of this model.                  *)
 (*                                                                   *)
 (*  Phase 1 leaks the entire master key msk to the attacker (worst   *)
 (*  case: full core-PKG compromise); UEs keep running, so the        *)
@@ -21,20 +31,21 @@
 (*                                                                   *)
 (*  Dolev-Yao attacker; signatures are ideal unforgeable objects.    *)
 (*                                                                   *)
-(*  Proof targets (G1-G5 as in Algorithm 1, plus G6-G7):             *)
+(*  Proof targets (G1-G7 as in Algorithm 1, plus G8-G9):             *)
 (*    G1  core-PKG master key secret before compromise     true      *)
-(*    G2  honest gNB signing key x_U secret                true      *)
-(*    G3  agreement under the commitment the honest gNB              *)
-(*        registered: a UE accepts (Q, m, t) only if the             *)
-(*        honest gNB signed m under Q at timestamp t       true      *)
+(*    G2  the named gNB's signing key x_U secret           true      *)
+(*    G3  agreement under the commitment the named gNB               *)
+(*        registered, on message and timestamp together    true      *)
 (*    G4  injective agreement                             false      *)
 (*    G5  executability (non-vacuity)                     false      *)
-(*    G6  gNB self-chosen component u1 still secret after            *)
+(*    G6  stale SIB1 rejected past the window              true      *)
+(*    G7  the stale-rejection path is reachable           false      *)
+(*    G8  gNB self-chosen component u1 still secret after            *)
 (*        msk leaks, so x_U is not recoverable             true      *)
-(*    G7  agreement under a commitment the compromised PKG           *)
+(*    G9  agreement under a commitment the compromised PKG           *)
 (*        chose itself                                    false      *)
 (*                                                                   *)
-(*  G3 with G7 delimits the guarantee: a compromised PKG can issue   *)
+(*  G3 with G9 delimits the guarantee: a compromised PKG can issue   *)
 (*  a valid key for any identity, but not under the commitment a     *)
 (*  legitimate gNB registered.                                       *)
 (* ================================================================= *)
@@ -47,6 +58,7 @@ free ch_air:  channel.             (* SIB1 broadcast *)
 type skey.   (* secret scalar: msk, u1, z_U, x_U *)
 type pkey.   (* public point X = x * P *)
 type id.     (* gNB identity U_BS *)
+             (* timestamps are the built-in type nat *)
 
 (* --------------------- Cryptographic abstraction ----------------- *)
 fun pk(skey): pkey.                    (* one-way map s |-> s * P *)
@@ -64,47 +76,63 @@ reduc forall mk: skey, u: id, a: skey;
 (* ----------------------------- Events ---------------------------- *)
 (*  The commitment is carried explicitly: it is what identifies the  *)
 (*  gNB that registered it.                                          *)
-event begin_sign(id, pkey, bitstring, bitstring).
-event auth_ok(id, pkey, bitstring, bitstring).
+event begin_sign(id, pkey, bitstring, nat).
+event auth_ok(id, pkey, bitstring, nat).
+event ue_accept(id, bitstring, nat, nat).   (* cell, SIB1, T_sign, T_current *)
 
 (* ---------------------------- Names ------------------------------ *)
 free msk: skey [private].           (* core-PKG master key *)
-free u1:  skey [private].           (* honest gNB self-chosen component *)
-free idH: id.                       (* honest gNB identity *)
-free endmark: bitstring [private].  (* released only if a UE completes *)
+free u1:  skey [private].           (* the named gNB's self-chosen component *)
+free idH: id.                       (* the named gNB's identity *)
+free endmark: bitstring [private].  (* released if a UE accepts *)
+free stalemark: bitstring [private]. (* released if a UE rejects as stale *)
 free uhat: skey.                    (* component a compromised PKG picks itself *)
-free sibA: bitstring.               (* SIB1 and timestamp the attacker chooses *)
-free tsA:  bitstring.
+free sibA: bitstring.               (* SIB1 the attacker chooses; its         *)
+                                    (* timestamp is the literal 0 in G9,      *)
+                                    (* since nat admits no free names         *)
 
 (* ------------------------- Security goals ------------------------ *)
-(*  (G1) Expected: true. *)
+(*  (G1) Expected: true.                                             *)
 query attacker(msk) phase 0.
 (*  (G2) Expected: true, including after msk leaks: the PKG          *)
-(*       contribution is recomputable from msk but x_U also needs u1. *)
+(*       contribution is recomputable from msk but x_U also needs u1.*)
 query attacker(cmp(u1, cert(msk, idH, pk(u1)))).
 (*  (G3) Expected: true, and it holds after the compromise too:      *)
-(*       signing under the honest gNB's registered commitment        *)
-(*       requires u1, which the PKG never learns.                    *)
-query m: bitstring, t: bitstring;
+(*       signing under the named gNB's registered commitment         *)
+(*       requires u1, which the PKG never learns. The timestamp      *)
+(*       appears in both events, so agreement is on the (message,    *)
+(*       timestamp) pair: a stale SIB1 cannot be re-stamped.         *)
+query m: bitstring, t: nat;
     event(auth_ok(idH, pk(u1), m, t)) ==> event(begin_sign(idH, pk(u1), m, t)).
 (*  (G4) Expected: false. One signed SIB1 is legitimately received   *)
 (*       by many UE sessions, so several auth_ok events map to one   *)
 (*       begin_sign. G3 still holds, so this is replay, not forgery. *)
-query m: bitstring, t: bitstring;
+(*       A single, unreplicated UE makes this query hold, since      *)
+(*       that UE accepts once and its one acceptance matches one     *)
+(*       signing. Staleness is bounded by G6, not by G4.             *)
+query m: bitstring, t: nat;
     inj-event(auth_ok(idH, pk(u1), m, t))
         ==> inj-event(begin_sign(idH, pk(u1), m, t)).
 (*  (G5) Expected: false, exhibiting a completing trace.             *)
 query attacker(endmark).
-(*  (G6) Expected: true. This is the no-single-point-of-failure      *)
+(*  (G6) Expected: true. No UE accepts outside the window, for any   *)
+(*       (T_sign, T_current) pair the attacker can build, in either  *)
+(*       phase.                                                      *)
+query u: id, m: bitstring, ts: nat, now: nat;
+    event(ue_accept(u, m, ts, now)) ==> now < ts + 3.
+(*  (G7) Expected: false, i.e. reachable. Shows G6 does not hold     *)
+(*       merely because the rejection path is dead.                  *)
+query attacker(stalemark).
+(*  (G8) Expected: true. This is the no-single-point-of-failure      *)
 (*       goal: u1 is queried after msk has leaked in full.           *)
 query attacker(u1).
-(*  (G7) Expected: false. Same identity as G3, but under a           *)
+(*  (G9) Expected: false. Same identity as G3, but under a           *)
 (*       commitment the compromised PKG picked itself: it can issue  *)
 (*       a valid key for idH under pk(uhat) and sign under it. Any   *)
 (*       such key necessarily carries a commitment distinct from     *)
 (*       the registered one, which is what G3 rules out.             *)
-query event(auth_ok(idH, pk(uhat), sibA, tsA))
-        ==> event(begin_sign(idH, pk(uhat), sibA, tsA)).
+query event(auth_ok(idH, pk(uhat), sibA, 0))
+        ==> event(begin_sign(idH, pk(uhat), sibA, 0)).
 
 (* ------------------------ core-PKG process ----------------------- *)
 (*  Receives the identity and the gNB commitment, returns the        *)
@@ -114,26 +142,34 @@ let CorePKG(mk: skey) =
     out(ch_prov, (u, qu, cert(mk, u, qu))).
 
 (* -------------------------- gNB process -------------------------- *)
+(*  The signing time is read off the air interface, so the attacker  *)
+(*  schedules when the gNB signs; the gNB binds it into the          *)
+(*  signature alongside SIB1.                                        *)
 let GNB(uu: skey, u: id) =
     out(ch_prov, (u, pk(uu)));
     in(ch_prov, (= u, = pk(uu), zu: skey));
     new sib1: bitstring;
-    new ts: bitstring;              (* fresh timestamp, modeled as a nonce *)
+    in(ch_air, ts: nat);            (* T_sign *)
     event begin_sign(u, pk(uu), sib1, ts);
     out(ch_air, (u, sib1, ts, sign((sib1, ts), cmp(uu, zu)), pk(uu))).
 
 (* --------------------------- UE process -------------------------- *)
 let UE(mpk: pkey) =
-    in(ch_air, (u: id, m: bitstring, ts: bitstring, s: bitstring, cu: pkey));
+    in(ch_air, (now: nat, u: id, m: bitstring, ts: nat,
+                s: bitstring, cu: pkey));          (* now = T_current *)
     let xpk: pkey = epk(mpk, u, cu) in
     let (= m, = ts) = checksign(s, xpk) in
-    event auth_ok(u, cu, m, ts);
-    out(ch_air, endmark).
+    if now < ts + 3 then            (* T_current < T_sign + Dt *)
+        event ue_accept(u, m, ts, now);
+        event auth_ok(u, cu, m, ts);
+        out(ch_air, endmark)
+    else
+        out(ch_air, stalemark).
 
 (* ------------------------------ Main ----------------------------- *)
 process
     ( !CorePKG(msk)
-    | GNB(u1, idH)                         (* the distinguished honest gNB *)
+    | GNB(u1, idH)                         (* the named gNB (see G2, G3) *)
     | !( new uu: skey; new u: id; GNB(uu, u) )  (* other gNBs *)
     | !UE(pk(msk))                         (* arbitrarily many UEs *)
     | ( phase 1;                           (* full core-PKG compromise *)

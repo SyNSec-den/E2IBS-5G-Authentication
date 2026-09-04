@@ -8,17 +8,30 @@
 (*  (SIB1, timestamp) under that single key and broadcasts it to     *)
 (*  UEs over the attacker-controlled air interface. A UE checks      *)
 (*  that the presented public key is the one it reconstructs from    *)
-(*  mpk for identity U, then checks the signature.                   *)
+(*  mpk for identity U, then checks the signature and the window.    *)
+(*                                                                   *)
+(*  Timestamps are natural numbers, so the UE can apply the          *)
+(*  protocol's window check                                          *)
+(*                                                                   *)
+(*      T_current < T_sign + Dt        (Dt = 3 ticks here)           *)
+(*                                                                   *)
+(*  before accepting a SIB1. T_current is read off the air           *)
+(*  interface, so the attacker supplies the UE's clock: G6 says the  *)
+(*  check cannot be bypassed, not that the clock cannot be faked.    *)
+(*  Clock integrity is an assumption of this model.                  *)
 (*                                                                   *)
 (*  Dolev-Yao attacker; signatures are ideal unforgeable objects.    *)
 (*                                                                   *)
 (*  Proof targets:                                                   *)
 (*    G1  core-PKG master key secret                       true      *)
-(*    G2  honest gNB signing key secret                    true      *)
-(*    G3  agreement: a UE accepts (P, m, t) only if an               *)
-(*        honest gNB signed m under P at timestamp t       true      *)
+(*    G2  the named gNB's signing key secret               true      *)
+(*    G3  agreement on key, message and timestamp: a UE              *)
+(*        accepts (P, m, t) only if an honest gNB signed             *)
+(*        m and t together under P                         true      *)
 (*    G4  injective agreement                             false      *)
 (*    G5  executability (non-vacuity)                     false      *)
+(*    G6  stale SIB1 rejected past the window              true      *)
+(*    G7  the stale-rejection path is reachable           false      *)
 (* ================================================================= *)
 
 (* ---------------------------- Channels --------------------------- *)
@@ -29,6 +42,7 @@ free ch_air:  channel.             (* SIB1 broadcast *)
 type skey.   (* secret scalar: msk, sk_BS *)
 type pkey.   (* public point X = x * P *)
 type id.     (* gNB identity U_BS *)
+             (* timestamps are the built-in type nat *)
 
 (* --------------------- Cryptographic abstraction ----------------- *)
 fun pk(skey): pkey.                (* one-way map s |-> s * P *)
@@ -44,30 +58,44 @@ reduc forall mk: skey, u: id;
     keyok(pk(mk), u, pk(keyext(mk, u))) = ok.
 
 (* ----------------------------- Events ---------------------------- *)
-event begin_sign(pkey, bitstring, bitstring).
-event auth_ok(pkey, bitstring, bitstring).
+event begin_sign(pkey, bitstring, nat).
+event auth_ok(pkey, bitstring, nat).
+event ue_accept(id, bitstring, nat, nat).   (* cell, SIB1, T_sign, T_current *)
 
 (* ---------------------------- Names ------------------------------ *)
-free msk: skey [private].           (* core-PKG master key *)
-free idH: id.                       (* honest gNB identity *)
-free endmark: bitstring [private].  (* released only if a UE completes *)
+free msk: skey [private].              (* core-PKG master key *)
+free idH: id.                          (* the named gNB's identity *)
+free endmark: bitstring [private].     (* released if a UE accepts *)
+free stalemark: bitstring [private].   (* released if a UE rejects as stale *)
 
 (* ------------------------- Security goals ------------------------ *)
-(*  (G1) Expected: true. *)
+(*  (G1) Expected: true.                                             *)
 query attacker(msk).
 (*  (G2) Expected: true. The base scheme has a single key component, *)
 (*       so this covers all of the gNB's secret material.            *)
 query attacker(keyext(msk, idH)).
-(*  (G3) Expected: true. *)
-query p: pkey, m: bitstring, t: bitstring;
+(*  (G3) Expected: true. The timestamp appears in both events, so    *)
+(*       this is agreement on the (message, timestamp) pair: a stale *)
+(*       SIB1 cannot be re-stamped with a current timestamp.         *)
+query p: pkey, m: bitstring, t: nat;
     event(auth_ok(p, m, t)) ==> event(begin_sign(p, m, t)).
 (*  (G4) Expected: false. One signed SIB1 is legitimately received   *)
 (*       by many UE sessions, so several auth_ok events map to one   *)
 (*       begin_sign. G3 still holds, so this is replay, not forgery. *)
-query p: pkey, m: bitstring, t: bitstring;
+(*       A single, unreplicated UE makes this query hold, since      *)
+(*       that UE accepts once and its one acceptance matches one     *)
+(*       signing. Staleness is bounded by G6, not by G4.             *)
+query p: pkey, m: bitstring, t: nat;
     inj-event(auth_ok(p, m, t)) ==> inj-event(begin_sign(p, m, t)).
 (*  (G5) Expected: false, exhibiting a completing trace.             *)
 query attacker(endmark).
+(*  (G6) Expected: true. No UE accepts outside the window, for any   *)
+(*       (T_sign, T_current) pair the attacker can build.            *)
+query u: id, m: bitstring, ts: nat, now: nat;
+    event(ue_accept(u, m, ts, now)) ==> now < ts + 3.
+(*  (G7) Expected: false, i.e. reachable. Shows G6 does not hold     *)
+(*       merely because the rejection path is dead.                  *)
+query attacker(stalemark).
 
 (* ------------------------ core-PKG process ----------------------- *)
 (*  Returns the whole signing key, tagged with the identity it was   *)
@@ -77,25 +105,33 @@ let CorePKG(mk: skey) =
     out(ch_prov, (u, keyext(mk, u))).
 
 (* -------------------------- gNB process -------------------------- *)
+(*  The signing time is read off the air interface, so the attacker  *)
+(*  schedules when the gNB signs; the gNB binds it into the          *)
+(*  signature alongside SIB1.                                        *)
 let GNB(u: id) =
     out(ch_prov, u);
     in(ch_prov, (= u, skbs: skey));
     new sib1: bitstring;
-    new ts: bitstring;              (* fresh timestamp, modeled as a nonce *)
+    in(ch_air, ts: nat);            (* T_sign *)
     event begin_sign(pk(skbs), sib1, ts);
     out(ch_air, (u, sib1, ts, sign((sib1, ts), skbs), pk(skbs))).
 
 (* --------------------------- UE process -------------------------- *)
 let UE(mpk: pkey) =
-    in(ch_air, (u: id, m: bitstring, ts: bitstring, s: bitstring, pkbs: pkey));
+    in(ch_air, (now: nat, u: id, m: bitstring, ts: nat,
+                s: bitstring, pkbs: pkey));        (* now = T_current *)
     let (= ok) = keyok(mpk, u, pkbs) in
     let (= m, = ts) = checksign(s, pkbs) in
-    event auth_ok(pkbs, m, ts);
-    out(ch_air, endmark).
+    if now < ts + 3 then            (* T_current < T_sign + Dt *)
+        event ue_accept(u, m, ts, now);
+        event auth_ok(pkbs, m, ts);
+        out(ch_air, endmark)
+    else
+        out(ch_air, stalemark).
 
 (* ------------------------------ Main ----------------------------- *)
 process
     ( !CorePKG(msk)
-    | GNB(idH)                         (* the distinguished honest gNB *)
+    | GNB(idH)                         (* the named gNB (see G2) *)
     | !( new u: id; GNB(u) )           (* arbitrarily many other gNBs *)
     | !UE(pk(msk)) )                   (* arbitrarily many UEs *)
